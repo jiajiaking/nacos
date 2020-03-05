@@ -23,22 +23,22 @@ import com.alibaba.nacos.client.monitor.MetricsMonitor;
 import com.alibaba.nacos.client.naming.backups.FailoverReactor;
 import com.alibaba.nacos.client.naming.cache.DiskCache;
 import com.alibaba.nacos.client.naming.net.NamingProxy;
-import com.alibaba.nacos.client.naming.utils.LogUtils;
-import com.alibaba.nacos.client.naming.utils.StringUtils;
 import com.alibaba.nacos.client.naming.utils.UtilAndComs;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.*;
 import java.util.concurrent.*;
+
+import static com.alibaba.nacos.client.utils.LogUtils.NAMING_LOGGER;
 
 /**
  * @author xuanyin
  */
 public class HostReactor {
 
-    public static final long DEFAULT_DELAY = 1000L;
+    private static final long DEFAULT_DELAY = 1000L;
 
-    public long updateHoldInterval = 5000L;
+    private static final long UPDATE_HOLD_INTERVAL = 5000L;
 
     private final Map<String, ScheduledFuture<?>> futureMap = new HashMap<String, ScheduledFuture<?>>();
 
@@ -105,9 +105,12 @@ public class HostReactor {
             return oldService;
         }
 
+        boolean changed = false;
+
         if (oldService != null) {
+
             if (oldService.getLastRefTime() > serviceInfo.getLastRefTime()) {
-                LogUtils.LOG.warn("out of date data received, old-t: " + oldService.getLastRefTime()
+                NAMING_LOGGER.warn("out of date data received, old-t: " + oldService.getLastRefTime()
                     + ", new-t: " + serviceInfo.getLastRefTime());
             }
 
@@ -140,9 +143,7 @@ public class HostReactor {
 
                 if (!oldHostMap.containsKey(key)) {
                     newHosts.add(host);
-                    continue;
                 }
-
             }
 
             for (Map.Entry<String, Instance> entry : oldHostMap.entrySet()) {
@@ -154,24 +155,26 @@ public class HostReactor {
 
                 if (!newHostMap.containsKey(key)) {
                     remvHosts.add(host);
-                    continue;
                 }
 
             }
 
             if (newHosts.size() > 0) {
-                LogUtils.LOG.info("new ips(" + newHosts.size() + ") service: "
-                    + serviceInfo.getName() + " -> " + JSON.toJSONString(newHosts));
+                changed = true;
+                NAMING_LOGGER.info("new ips(" + newHosts.size() + ") service: "
+                    + serviceInfo.getKey() + " -> " + JSON.toJSONString(newHosts));
             }
 
             if (remvHosts.size() > 0) {
-                LogUtils.LOG.info("removed ips(" + remvHosts.size() + ") service: "
-                    + serviceInfo.getName() + " -> " + JSON.toJSONString(remvHosts));
+                changed = true;
+                NAMING_LOGGER.info("removed ips(" + remvHosts.size() + ") service: "
+                    + serviceInfo.getKey() + " -> " + JSON.toJSONString(remvHosts));
             }
 
             if (modHosts.size() > 0) {
-                LogUtils.LOG.info("modified ips(" + modHosts.size() + ") service: "
-                    + serviceInfo.getName() + " -> " + JSON.toJSONString(modHosts));
+                changed = true;
+                NAMING_LOGGER.info("modified ips(" + modHosts.size() + ") service: "
+                    + serviceInfo.getKey() + " -> " + JSON.toJSONString(modHosts));
             }
 
             serviceInfo.setJsonFromServer(json);
@@ -182,7 +185,8 @@ public class HostReactor {
             }
 
         } else {
-            LogUtils.LOG.info("new ips(" + serviceInfo.ipCount() + ") service: " + serviceInfo.getName() + " -> " + JSON
+            changed = true;
+            NAMING_LOGGER.info("init new ips(" + serviceInfo.ipCount() + ") service: " + serviceInfo.getKey() + " -> " + JSON
                 .toJSONString(serviceInfo.getHosts()));
             serviceInfoMap.put(serviceInfo.getKey(), serviceInfo);
             eventDispatcher.serviceChanged(serviceInfo);
@@ -192,13 +196,15 @@ public class HostReactor {
 
         MetricsMonitor.getServiceInfoMapSizeMonitor().set(serviceInfoMap.size());
 
-        LogUtils.LOG.info("current ips:(" + serviceInfo.ipCount() + ") service: " + serviceInfo.getName() +
-            " -> " + JSON.toJSONString(serviceInfo.getHosts()));
+        if (changed) {
+            NAMING_LOGGER.info("current ips:(" + serviceInfo.ipCount() + ") service: " + serviceInfo.getKey() +
+                " -> " + JSON.toJSONString(serviceInfo.getHosts()));
+        }
 
         return serviceInfo;
     }
 
-    private ServiceInfo getSerivceInfo0(String serviceName, String clusters) {
+    private ServiceInfo getServiceInfo0(String serviceName, String clusters) {
 
         String key = ServiceInfo.getKey(serviceName, clusters);
 
@@ -215,13 +221,13 @@ public class HostReactor {
 
     public ServiceInfo getServiceInfo(final String serviceName, final String clusters) {
 
-        LogUtils.LOG.debug("failover-mode: " + failoverReactor.isFailoverSwitch());
+        NAMING_LOGGER.debug("failover-mode: " + failoverReactor.isFailoverSwitch());
         String key = ServiceInfo.getKey(serviceName, clusters);
         if (failoverReactor.isFailoverSwitch()) {
             return failoverReactor.getService(key);
         }
 
-        ServiceInfo serviceObj = getSerivceInfo0(serviceName, clusters);
+        ServiceInfo serviceObj = getServiceInfo0(serviceName, clusters);
 
         if (null == serviceObj) {
             serviceObj = new ServiceInfo(serviceName, clusters);
@@ -234,14 +240,13 @@ public class HostReactor {
 
         } else if (updatingMap.containsKey(serviceName)) {
 
-            if (updateHoldInterval > 0) {
+            if (UPDATE_HOLD_INTERVAL > 0) {
                 // hold a moment waiting for update finish
                 synchronized (serviceObj) {
                     try {
-                        serviceObj.wait(updateHoldInterval);
+                        serviceObj.wait(UPDATE_HOLD_INTERVAL);
                     } catch (InterruptedException e) {
-                        LogUtils.LOG.error("[getServiceInfo]",
-                            "serviceName:" + serviceName + ", clusters:" + clusters, e);
+                        NAMING_LOGGER.error("[getServiceInfo] serviceName:" + serviceName + ", clusters:" + clusters, e);
                     }
                 }
             }
@@ -267,17 +272,17 @@ public class HostReactor {
         }
     }
 
-    @SuppressFBWarnings("NN_NAKED_NOTIFY")
     public void updateServiceNow(String serviceName, String clusters) {
-        ServiceInfo oldService = getSerivceInfo0(serviceName, clusters);
+        ServiceInfo oldService = getServiceInfo0(serviceName, clusters);
         try {
 
             String result = serverProxy.queryList(serviceName, clusters, pushReceiver.getUDPPort(), false);
+
             if (StringUtils.isNotEmpty(result)) {
                 processServiceJSON(result);
             }
         } catch (Exception e) {
-            LogUtils.LOG.error("NA", "failed to update serviceName: " + serviceName, e);
+            NAMING_LOGGER.error("[NA] failed to update serviceName: " + serviceName, e);
         } finally {
             if (oldService != null) {
                 synchronized (oldService) {
@@ -291,7 +296,7 @@ public class HostReactor {
         try {
             serverProxy.queryList(serviceName, clusters, pushReceiver.getUDPPort(), false);
         } catch (Exception e) {
-            LogUtils.LOG.error("NA", "failed to update serviceName: " + serviceName, e);
+            NAMING_LOGGER.error("[NA] failed to update serviceName: " + serviceName, e);
         }
     }
 
@@ -329,7 +334,7 @@ public class HostReactor {
 
                 lastRefTime = serviceObj.getLastRefTime();
             } catch (Throwable e) {
-                LogUtils.LOG.warn("NA", "failed to update serviceName: " + serviceName, e);
+                NAMING_LOGGER.warn("[NA] failed to update serviceName: " + serviceName, e);
             }
 
         }
